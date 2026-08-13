@@ -1165,7 +1165,7 @@ class _BackfillResult(StrEnum):
     ERROR = "error"
 
 
-def _backfill_submission(  # noqa: PLR0911, PLR0913
+def _backfill_submission(  # noqa: C901, PLR0911, PLR0913
     current_submission: Submission,
     s3_client: Any,
     bucket: str,
@@ -1240,6 +1240,15 @@ def _backfill_submission(  # noqa: PLR0911, PLR0913
             f"(use --force for all, or --allow-overwrite for named fields).[/dim]"
         )
     if not submission_diff.has_pending and not donors_diff.has_pending:
+        return _BackfillResult.WOULD_OVERWRITE
+
+    # Donor rows are named by pseudonym rather than by column, so --allow-overwrite cannot address
+    # them. An unpermitted one holds back the whole submission instead of being written silently.
+    if not force and donors_diff.has_pending_destructive:
+        overwritten = ", ".join(str(d.pseudonym) for d in (*donors_diff.updated, *donors_diff.deleted))
+        console_err.print(
+            f"[dim]  {submission_id}: would overwrite donor {overwritten}, skipping (use --force to overwrite).[/dim]"
+        )
         return _BackfillResult.WOULD_OVERWRITE
 
     if dry_run:
@@ -1324,6 +1333,10 @@ def backfill(  # noqa: PLR0913
     different value is only overwritten with --force, or when --allow-overwrite names it;
     any other overwrite is reported and held back, so a submission is updated in part
     rather than skipped entirely.
+
+    Donor records are named by pseudonym, which --allow-overwrite cannot address, so one
+    that metadata.json would overwrite or remove holds back the whole submission until
+    --force is passed.
 
     Candidate selection (mutually exclusive):
 

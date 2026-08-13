@@ -288,6 +288,88 @@ def test_backfill_submission_force_does_not_overwrite_ignore_fields(
     assert persisted.submission_metadata == metadata.to_redacted_dict()
 
 
+def _diverge_stored_donor(db: SubmissionDb, submission_id: str) -> str:
+    """Change a stored donor so that re-reading metadata.json would overwrite it.
+
+    :returns: the pseudonym of the donor that was changed.
+    """
+    donor = db.get_donors(submission_id)[0]
+    donor.mv_consented = not donor.mv_consented
+    db.update_donor(donor)
+    return donor.pseudonym
+
+
+def test_backfill_submission_holds_back_a_destructive_donor_change_without_force(
+    db: SubmissionDb, s3_client_mock: Any, metadata: GrzSubmissionMetadata, submission_id: str
+) -> None:
+    """A donor row that metadata.json would overwrite is left alone, and nothing else is written.
+
+    --allow-overwrite names columns, so it cannot exempt a single donor. Without --force the whole
+    submission is held back rather than the donor being overwritten as a side effect of a backfill.
+    """
+    _populate_full_row(db, submission_id, metadata)
+    pseudonym = _diverge_stored_donor(db, submission_id)
+    diverged = db.get_donors(submission_id, pseudonym)[0].mv_consented
+    _put_metadata(s3_client_mock, submission_id, metadata)
+
+    result = _backfill_submission(
+        current_submission=db.get_submission(submission_id),
+        s3_client=s3_client_mock,
+        bucket=BUCKET,
+        db_service=db,
+        dry_run=False,
+        force=False,
+        ignore_fields=IGNORE_FIELDS,
+    )
+
+    assert result == _BackfillResult.WOULD_OVERWRITE
+    assert db.get_donors(submission_id, pseudonym)[0].mv_consented == diverged
+
+
+def test_backfill_submission_overwrites_a_donor_with_force(
+    db: SubmissionDb, s3_client_mock: Any, metadata: GrzSubmissionMetadata, submission_id: str
+) -> None:
+    """--force is what permits a donor row to be brought back in line with metadata.json."""
+    _populate_full_row(db, submission_id, metadata)
+    pseudonym = _diverge_stored_donor(db, submission_id)
+    diverged = db.get_donors(submission_id, pseudonym)[0].mv_consented
+    _put_metadata(s3_client_mock, submission_id, metadata)
+
+    result = _backfill_submission(
+        current_submission=db.get_submission(submission_id),
+        s3_client=s3_client_mock,
+        bucket=BUCKET,
+        db_service=db,
+        dry_run=False,
+        force=True,
+        ignore_fields=IGNORE_FIELDS,
+    )
+
+    assert result == _BackfillResult.UPDATED
+    assert db.get_donors(submission_id, pseudonym)[0].mv_consented != diverged
+
+
+def test_backfill_submission_dry_run_reports_the_donor_it_would_hold_back(
+    db: SubmissionDb, s3_client_mock: Any, metadata: GrzSubmissionMetadata, submission_id: str
+) -> None:
+    """A dry run predicts the outcome of the real run rather than reporting an update it would refuse."""
+    _populate_full_row(db, submission_id, metadata)
+    _diverge_stored_donor(db, submission_id)
+    _put_metadata(s3_client_mock, submission_id, metadata)
+
+    result = _backfill_submission(
+        current_submission=db.get_submission(submission_id),
+        s3_client=s3_client_mock,
+        bucket=BUCKET,
+        db_service=db,
+        dry_run=True,
+        force=False,
+        ignore_fields=IGNORE_FIELDS,
+    )
+
+    assert result == _BackfillResult.WOULD_OVERWRITE
+
+
 def test_backfill_submission_reads_a_consent_datetime_without_a_timezone(
     db: SubmissionDb, s3_client_mock: Any, metadata: GrzSubmissionMetadata, submission_id: str
 ) -> None:
